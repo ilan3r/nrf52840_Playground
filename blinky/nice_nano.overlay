@@ -1,0 +1,5 @@
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+&led0 {
+    gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+};
