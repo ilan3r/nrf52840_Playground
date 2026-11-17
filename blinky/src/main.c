@@ -10,6 +10,7 @@
 
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS   (10*6*1000)
+#define MAX_NUMBER_FACT 10
 
 /* The devicetree node identifier for the "led0" alias. */
 #define LED0_NODE DT_ALIAS(led0)
@@ -26,7 +27,20 @@ static struct gpio_callback button_cb_data;
 
 void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    gpio_pin_toggle_dt(&led);
+	int i;
+	long int factorial = 1;
+
+	printk("Calculating the factorials of numbers from 1 to %d:\n", MAX_NUMBER_FACT);
+	for (i = 1; i <= MAX_NUMBER_FACT; i++) {
+		factorial = factorial * i;
+		printk("The factorial of %2d = %ld\n", i, factorial);
+	}
+	printk("_______________________________________________________\n");
+	/*Important note!
+	Code in ISR runs at a high priority, therefore, it should be written with timing in mind.
+	Too lengthy or too complex tasks should not be performed by an ISR, they should be deferred
+	to a thread.
+	*/
 }
 
 int main(void)
