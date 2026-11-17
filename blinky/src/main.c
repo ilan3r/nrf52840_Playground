@@ -9,7 +9,7 @@
 #include <zephyr/drivers/gpio.h>
 
 /* 1000 msec = 1 sec */
-#define SLEEP_TIME_MS   100
+#define SLEEP_TIME_MS   (10*6*1000)
 
 /* The devicetree node identifier for the "led0" alias. */
 #define LED0_NODE DT_ALIAS(led0)
@@ -22,39 +22,50 @@
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(SW0_NODE, gpios);
 
+static struct gpio_callback button_cb_data;
+
+void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    gpio_pin_toggle_dt(&led);
+}
+
 int main(void)
 {
 	int ret;
-	bool led_state = true;
 
-	if (!gpio_is_ready_dt(&led)) {
-		return 0;
-	}
-
-	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);
-	if (ret < 0) {
-		return 0;
-	}
-
-	if (!device_is_ready(button.port)) {
+	if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&button)) {
+		printf("LED or button GPIO is not ready\n");
 		return -1;
+	}
+
+	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+	if (ret < 0) {
+		printf("LED configuration failed: %d\n", ret);
+		return ret;
 	}
 
 	ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
 	if (ret < 0) {
-		return -1;
+		printf("Button configuration failed: %d\n", ret);
+		return ret;
 	}
 
-	printf("hello world, starting while loop\r\n");
+	gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
+	ret = gpio_add_callback(button.port, &button_cb_data);
+	if (ret < 0) {
+		printf("Button callback registration failed: %d\n", ret);
+		return ret;
+	}
+
+	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
+	if (ret < 0) {
+		printf("Button interrupt configuration failed: %d\n", ret);
+		return ret;
+	}
+
+	printf("Button interrupt ready\n");
 
 	while (1) {
-		bool val = gpio_pin_get_dt(&button);
-		ret = gpio_pin_set_dt(&led, val);
-
-		if (ret < 0){
-			return 0; 
-		}
-		
 		k_msleep(SLEEP_TIME_MS);
 	}
 	return 0;
