@@ -4,99 +4,119 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <stdio.h>
-#include <zephyr/kernel.h>
+#include <errno.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/uart.h>
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/printk.h>
 
-/* 1000 msec = 1 sec */
-#define SLEEP_TIME_MS   (10*6*1000)
-#define MAX_NUMBER_FACT 10
+LOG_MODULE_REGISTER(Less5_Exer1, LOG_LEVEL_DBG);
 
-/* The devicetree node identifier for the "led0" alias. */
-#define LED0_NODE DT_ALIAS(led0)
-#define SW0_NODE DT_ALIAS(sw0)
-
-/*
- * A build error on this line means your board is unsupported.
- * See the sample documentation for information on how to fix this.
- */
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
-static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(SW0_NODE, gpios);
-
+static const struct device *const uart = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+static const struct gpio_dt_spec leds[] = {
+	GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios),
+	GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios),
+	GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios),
+};
 static struct gpio_callback button_cb_data;
 
-LOG_MODULE_REGISTER(Less4_Exer2,LOG_LEVEL_DBG);
-
-void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+static void print_button_press(struct k_work *work)
 {
-	int i;
-	long int factorial = 1;
+	ARG_UNUSED(work);
+	printk("hello from interrupt\n");
+}
 
-    LOG_INF("Calculating the factorials of numbers 1 to %d:",MAX_NUMBER_FACT);
-	for (i = 1; i <= MAX_NUMBER_FACT; i++) {
-		factorial = factorial * i;
-        LOG_INF("The factorial of %2d = %ld",i,factorial);
+K_WORK_DEFINE(button_work, print_button_press);
+
+static void button_pressed(const struct device *dev, struct gpio_callback *cb,
+			   uint32_t pins)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+
+	k_work_submit(&button_work);
+}
+
+static void uart_cb(const struct device *dev, void *user_data)
+{
+	uint8_t received[10];
+	int count;
+
+	ARG_UNUSED(user_data);
+
+	if (uart_irq_update(dev) <= 0 || uart_irq_rx_ready(dev) <= 0) {
+		return;
 	}
-	/*Important note!
-	Code in ISR runs at a high priority, therefore, 
-	it should be written with timing in mind.
-	Too lengthy or too complex tasks should not be performed by an ISR,
-	they should be deferred	to a thread.
-	*/
+
+	while ((count = uart_fifo_read(dev, received, sizeof(received))) > 0) {
+		for (int i = 0; i < count; i++) {
+			if (received[i] >= '1' && received[i] <= '3') {
+				gpio_pin_toggle_dt(&leds[received[i] - '1']);
+			}
+		}
+	}
 }
 
 int main(void)
 {
 	int ret;
-	int exercise_num = 2;
-	uint8_t data[] = {0x00, 0x01, 0x02, 0x03,
-					0x04, 0x05, 0x06, 0x07,
-					'H', 'e', 'l', 'l','o'};
-	// Printf-like messages
-	LOG_INF("nRF Connect SDK Fundamentals");
-	LOG_INF("Exercise %d",exercise_num);    
-	LOG_DBG("A log message in debug level");
-	LOG_WRN("A log message in warning level!");
-	LOG_ERR("A log message in Error level!");
-	// Hexdump some data
-	LOG_HEXDUMP_INF(data, sizeof(data),"Sample Data!"); 
+	uint32_t dtr = 0;
 
-
-	if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&button)) {
-		printf("LED or button GPIO is not ready\n");
-		return -1;
+	if (!device_is_ready(uart) || !gpio_is_ready_dt(&button)) {
+		printk("UART or button GPIO is not ready\n");
+		return -ENODEV;
 	}
 
-	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
-	if (ret < 0) {
-		printf("LED configuration failed: %d\n", ret);
-		return ret;
+	for (size_t i = 0; i < ARRAY_SIZE(leds); i++) {
+		if (!gpio_is_ready_dt(&leds[i])) {
+			printk("LED %u GPIO is not ready\n", (unsigned int)i + 1);
+			return -ENODEV;
+		}
+
+		ret = gpio_pin_configure_dt(&leds[i], GPIO_OUTPUT_ACTIVE);
+		if (ret < 0) {
+			printk("LED %u configuration failed: %d\n", (unsigned int)i + 1, ret);
+			return ret;
+		}
 	}
 
 	ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
 	if (ret < 0) {
-		printf("Button configuration failed: %d\n", ret);
+		printk("Button configuration failed: %d\n", ret);
 		return ret;
 	}
 
 	gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
 	ret = gpio_add_callback(button.port, &button_cb_data);
 	if (ret < 0) {
-		printf("Button callback registration failed: %d\n", ret);
+		printk("Button callback registration failed: %d\n", ret);
 		return ret;
 	}
 
 	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
 	if (ret < 0) {
-		printf("Button interrupt configuration failed: %d\n", ret);
+		printk("Button interrupt configuration failed: %d\n", ret);
 		return ret;
 	}
 
-	printf("Button interrupt ready\n");
-
-	while (1) {
-		k_msleep(SLEEP_TIME_MS);
+	ret = uart_irq_callback_user_data_set(uart, uart_cb, NULL);
+	if (ret < 0) {
+		printk("UART callback registration failed: %d\n", ret);
+		return ret;
 	}
+
+	uart_irq_rx_enable(uart);
+
+	/* Wait for the terminal to open before printing the instructions. */
+	while (uart_line_ctrl_get(uart, UART_LINE_CTRL_DTR, &dtr) == 0 && dtr == 0) {
+		k_msleep(100);
+	}
+
+	LOG_INF("nRF Connect SDK Fundamentals Course");
+	printk("Press 1-3 to toggle the three external LEDs.\r\n");
+
 	return 0;
 }
