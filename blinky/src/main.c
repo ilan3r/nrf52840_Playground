@@ -4,119 +4,150 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <errno.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/uart.h>
+ /*
+ 
+ connect BNO055 to the nice!nano board instead of the BME280 board they use in the exercise 
+ BNO055  | nice!nano board 
+ VIN | VCC/3V3
+ GND | GND
+ SDA | D2/P0.17
+ SCL | D3/P0.20 
+ */
+
 #include <zephyr/kernel.h>
-#include <zephyr/logging/log.h>
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/byteorder.h>
 
-LOG_MODULE_REGISTER(Less5_Exer1, LOG_LEVEL_DBG);
+#define REG_ACC_DATA_X_LSB 0x08
+#define SLEEP_TIME_MS 1000
 
-static const struct device *const uart = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
-static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
-static const struct gpio_dt_spec leds[] = {
-	GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios),
-	GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios),
-	GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios),
-};
-static struct gpio_callback button_cb_data;
+/* BNO055 register addresses */
+#define REG_CHIP_ID      0x00
+#define REG_PAGE_ID      0x07
+#define REG_TEMP         0x34
+#define REG_UNIT_SEL     0x3B
+#define REG_OPR_MODE     0x3D
+#define REG_PWR_MODE     0x3E
+#define REG_TEMP_SOURCE  0x40
 
-static void print_button_press(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	printk("hello from interrupt\n");
-}
+/* Register values */
+#define BNO055_CHIP_ID   0xA0
+#define MODE_CONFIG      0x00
+#define MODE_ACCONLY     0x01
 
-K_WORK_DEFINE(button_work, print_button_press);
+/* get the node identifier of the sensor, defined in nice_nano.overlay */
+#define SENSOR_NODE DT_NODELABEL(bno055)
 
-static void button_pressed(const struct device *dev, struct gpio_callback *cb,
-			   uint32_t pins)
-{
-	ARG_UNUSED(dev);
-	ARG_UNUSED(cb);
-	ARG_UNUSED(pins);
+static const struct i2c_dt_spec dev_i2c =
+    I2C_DT_SPEC_GET(SENSOR_NODE);
 
-	k_work_submit(&button_work);
-}
-
-static void uart_cb(const struct device *dev, void *user_data)
-{
-	uint8_t received[10];
-	int count;
-
-	ARG_UNUSED(user_data);
-
-	if (uart_irq_update(dev) <= 0 || uart_irq_rx_ready(dev) <= 0) {
-		return;
-	}
-
-	while ((count = uart_fifo_read(dev, received, sizeof(received))) > 0) {
-		for (int i = 0; i < count; i++) {
-			if (received[i] >= '1' && received[i] <= '3') {
-				gpio_pin_toggle_dt(&leds[received[i] - '1']);
-			}
-		}
-	}
-}
 
 int main(void)
 {
-	int ret;
-	uint32_t dtr = 0;
+    int ret;
+    uint8_t chip_id;
+    uint8_t temperature_raw;
 
-	if (!device_is_ready(uart) || !gpio_is_ready_dt(&button)) {
-		printk("UART or button GPIO is not ready\n");
-		return -ENODEV;
-	}
+    /* Check that the I2C controller is ready. */
+    if (!i2c_is_ready_dt(&dev_i2c)) {
+        printk("I2C controller is not ready\n");
+        return -1;
+    }
 
-	for (size_t i = 0; i < ARRAY_SIZE(leds); i++) {
-		if (!gpio_is_ready_dt(&leds[i])) {
-			printk("LED %u GPIO is not ready\n", (unsigned int)i + 1);
-			return -ENODEV;
-		}
+    /* Allow the BNO055 time to boot after power-on. */
+    k_msleep(1000);
 
-		ret = gpio_pin_configure_dt(&leds[i], GPIO_OUTPUT_ACTIVE);
+    /* Select register page 0. */
+    ret = i2c_reg_write_byte_dt(&dev_i2c, REG_PAGE_ID, 0x00);
+    if (ret < 0) {
+        printk("Page selection failed: %d\n", ret);
+        return ret;
+    }
+
+    /* Read and verify the sensor's identity. */
+    ret = i2c_reg_read_byte_dt(&dev_i2c, REG_CHIP_ID, &chip_id);
+    if (ret < 0) {
+        printk("Chip ID read failed: %d\n", ret);
+        return ret;
+    }
+
+    printk("BNO055 chip ID: 0x%02x\n", chip_id);
+
+    if (chip_id != BNO055_CHIP_ID) {
+        printk("Unexpected chip ID; expected 0xA0\n");
+        return -1;
+    }
+
+    /* Enter configuration mode before changing settings. */
+    ret = i2c_reg_write_byte_dt(&dev_i2c, REG_OPR_MODE, MODE_CONFIG);
+    if (ret < 0) {
+        printk("Entering configuration mode failed: %d\n", ret);
+        return ret;
+    }
+
+    k_msleep(30);
+
+    /* Set normal power mode. */
+    ret = i2c_reg_write_byte_dt(&dev_i2c, REG_PWR_MODE, 0x00);
+    if (ret < 0) {
+        printk("Power configuration failed: %d\n", ret);
+        return ret;
+    }
+
+    k_msleep(10);
+
+    /* Select default units, including degrees Celsius. */
+    ret = i2c_reg_write_byte_dt(&dev_i2c, REG_UNIT_SEL, 0x00);
+    if (ret < 0) {
+        printk("Unit configuration failed: %d\n", ret);
+        return ret;
+    }
+
+    /* Use the accelerometer's internal temperature sensor. */
+    ret = i2c_reg_write_byte_dt(&dev_i2c, REG_TEMP_SOURCE, 0x00);
+    if (ret < 0) {
+        printk("Temperature source configuration failed: %d\n", ret);
+        return ret;
+    }
+
+    /* Enable the accelerometer. */
+    ret = i2c_reg_write_byte_dt(&dev_i2c, REG_OPR_MODE, MODE_ACCONLY);
+    if (ret < 0) {
+        printk("Starting measurement mode failed: %d\n", ret);
+        return ret;
+    }
+
+    k_msleep(100);
+
+    while (1) {
+		/* Read all three axes in one I2C transaction.
+		* Each axis occupies two bytes, least-significant byte first.
+		*/
+		uint8_t acceleration_data[6];
+
+		ret = i2c_burst_read_dt(
+			&dev_i2c,
+			REG_ACC_DATA_X_LSB,
+			acceleration_data,
+			sizeof(acceleration_data));
+
 		if (ret < 0) {
-			printk("LED %u configuration failed: %d\n", (unsigned int)i + 1, ret);
-			return ret;
+			printk("Acceleration read failed: %d\n", ret);
+		} else {
+			int16_t x_raw = (int16_t)sys_get_le16(&acceleration_data[0]);
+			int16_t y_raw = (int16_t)sys_get_le16(&acceleration_data[2]);
+			int16_t z_raw = (int16_t)sys_get_le16(&acceleration_data[4]);
+
+			/* With UNIT_SEL = 0x00, 100 counts represents 1 m/s^2. */
+			printk("Acceleration: X=%.2f, Y=%.2f, Z=%.2f m/s^2\n",
+				x_raw / 100.0,
+				y_raw / 100.0,
+				z_raw / 100.0);
 		}
-	}
 
-	ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
-	if (ret < 0) {
-		printk("Button configuration failed: %d\n", ret);
-		return ret;
-	}
-
-	gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
-	ret = gpio_add_callback(button.port, &button_cb_data);
-	if (ret < 0) {
-		printk("Button callback registration failed: %d\n", ret);
-		return ret;
-	}
-
-	ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
-	if (ret < 0) {
-		printk("Button interrupt configuration failed: %d\n", ret);
-		return ret;
-	}
-
-	ret = uart_irq_callback_user_data_set(uart, uart_cb, NULL);
-	if (ret < 0) {
-		printk("UART callback registration failed: %d\n", ret);
-		return ret;
-	}
-
-	uart_irq_rx_enable(uart);
-
-	/* Wait for the terminal to open before printing the instructions. */
-	while (uart_line_ctrl_get(uart, UART_LINE_CTRL_DTR, &dtr) == 0 && dtr == 0) {
-		k_msleep(100);
-	}
-
-	LOG_INF("nRF Connect SDK Fundamentals Course");
-	printk("Press 1-3 to toggle the three external LEDs.\r\n");
-
-	return 0;
+		k_msleep(SLEEP_TIME_MS);
+    }
 }
