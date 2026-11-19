@@ -6,82 +6,74 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
+#include "ncs_version.h"
+#if NCS_VERSION_NUMBER < 0x20600
+#include <zephyr/random/rand32.h>
+#else 
+#include <zephyr/random/random.h>
+#endif
 #include <string.h>
 
-// Define stack size used by each thread
-#define THREAD0_STACKSIZE      512
-#define THREAD1_STACKSIZE      512
-#define WORQ_THREAD_STACK_SIZE 512
+#define PRODUCER_STACKSIZE 1024
+#define CONSUMER_STACKSIZE 1024
 
-/* STEP 2 - Set the priorities of the threads */
-#define THREAD0_PRIORITY 2 
-#define THREAD1_PRIORITY 3
-#define WORKQ_PRIORITY   4
+/* STEP 2 - Set the priority of the producer and consumer thread */
+#define PRODUCER_PRIORITY        5 
+#define CONSUMER_PRIORITY        5
 
-// Define stack area used by workqueue thread
-static K_THREAD_STACK_DEFINE(my_stack_area, WORQ_THREAD_STACK_SIZE);
+/* STEP 9 - Define semaphore to monitor instances of available resource */
+K_SEM_DEFINE(instance_monitor_sem, 10, 10);
 
-// Define queue structure
-static struct k_work_q offload_work_q = {0};
+/* STEP 3 - Initialize the available instances of this resource */
+// volatile uint32_t available_instance_count = 10;
 
-/* STEP 5 - Define function to emulate non-urgent work */
-static inline void emulate_work()	// takes about 48 ms to finsih 
+// Function for getting access of resource
+void get_access(void)
 {
-	for(volatile int count_out = 0; count_out < 300000; count_out ++);
+	/* STEP 10.1 - Take semaphore when getting access to the resource */
+	k_sem_take(&instance_monitor_sem, K_FOREVER);
+	printk("Resource taken and available_instance_count = %d\n", k_sem_count_get(&instance_monitor_sem));
+
+	/* STEP 6.1 - Decrement available resource */	
+	// available_instance_count--;
+	// printk("Resource taken and available_instance_count = %d\n",  available_instance_count);
 }
 
-/* STEP 7 - Create work_info structure and offload function */
-struct work_info {
-    struct k_work work;
-    char name[25];
-} my_work;
-
-void offload_function(struct k_work *work_term)
+// Function for releasing access of resource
+void release_access(void)
 {
-	emulate_work();
+	/* STEP 10.2 - Give semaphore when releasing access to resource */
+	k_sem_give(&instance_monitor_sem);
+	printk("Resource given and available_instance_count = %d\n", k_sem_count_get(&instance_monitor_sem));
+
+	/* STEP 6.2 - Increment available resource */	
+	// available_instance_count++;
+	// printk("Resource given and available_instance_count = %d\n", available_instance_count);
 }
 
-void thread0(void)
+/* STEP 4 - Producer thread relinquishing access to instance */
+void producer(void)
 {
-	uint64_t time_stamp;
-	int64_t delta_time;
-	/* STEP 8 - Start the workqueue, */
-	k_work_queue_start(&offload_work_q, my_stack_area,
-                   K_THREAD_STACK_SIZEOF(my_stack_area), WORKQ_PRIORITY,
-                   NULL);
-
-	strcpy(my_work.name, "Thread0 emulate_work()");
-	k_work_init(&my_work.work, offload_function);
-	/* initialize the work item and connect it to its handler function */
-
+	printk("Producer thread started\n");
 	while (1) {
-		time_stamp = k_uptime_get();
-		/* STEP 9 - Submit the work item to the workqueue instead of calling emulate_work()
-		 * directly */
-		/* Remember to comment out emulate_work(); */
-		k_work_submit_to_queue(&offload_work_q, &my_work.work);
-		// emulate_work();
-		delta_time = k_uptime_delta(&time_stamp);
-		printk("thread0 yielding this round in %lld ms\n", delta_time);
-		k_msleep(20);
+		release_access();
+		k_msleep(sys_rand32_get() % 10);
 	}
 }
 
-/* STEP 4 - Define entry function for thread1 */
-void thread1(void)
+/* STEP 5 - Consumer thread obtaining access to instance */
+void consumer(void)
 {
-    uint64_t time_stamp;
-    int64_t delta_time;
-
-    while (1) {
-        time_stamp = k_uptime_get();
-        emulate_work();
-        delta_time = k_uptime_delta(&time_stamp);
-
-        printk("thread1 yielding this round in %lld ms\n", delta_time);
-        k_msleep(20);
-    }   
+	printk("Consumer thread started\n");
+	while (1) {
+		get_access();
+		k_msleep(sys_rand32_get() % 10);
+	}
 }
 
-K_THREAD_DEFINE(thread0_id, THREAD0_STACKSIZE, thread0, NULL, NULL, NULL, THREAD0_PRIORITY, 0, 0);
-K_THREAD_DEFINE(thread1_id, THREAD1_STACKSIZE, thread1, NULL, NULL, NULL, THREAD1_PRIORITY, 0, 0);
+// Define and initialize threads
+K_THREAD_DEFINE(producer_id, PRODUCER_STACKSIZE, producer, NULL, NULL, NULL, PRODUCER_PRIORITY, 0,
+		0);
+
+K_THREAD_DEFINE(consumer_id, CONSUMER_STACKSIZE, consumer, NULL, NULL, NULL, CONSUMER_PRIORITY, 0,
+		0);
